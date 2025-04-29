@@ -171,9 +171,11 @@ services:
         condition: service_healthy
       broker2:
         condition: service_healthy
+    # 初期化の際にtopicを作成しないと、監視するtopicが存在しないのでconsumerの起動でエラーになる
     command: >
       /bin/bash -c "
-      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic __consumer_offsets --replication-factor=2 --partitions=50 --bootstrap-server broker1:9092
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic __consumer_offsets --replication-factor=2 --partitions=50 --bootstrap-server broker1:9092 &&
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic app.public.user --replication-factor=2 --partitions=1 --bootstrap-server broker1:9092
       "
     platform: linux/amd64
 
