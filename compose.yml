@@ -1,0 +1,181 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    ports:
+      - 3333:3000
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    env_file:
+      - .env.docker
+    networks:
+      - app-network
+    depends_on:
+      broker1:
+        condition: service_healthy
+      broker2:
+        condition: service_healthy
+      kafka-initializer:
+        condition: service_completed_successfully
+    command: npm run start:dev
+    platform: linux/amd64
+
+  db:
+    container_name: db
+    image: postgres:16
+    restart: always
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - ./docker/db/data:/var/lib/postgresql/data
+      - ./docker/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./docker/db/postgresql.conf:/etc/postgresql/postgresql.conf
+    networks:
+      - app-network
+    command: postgres -c wal_level=logical
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d app"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka-ui:
+    container_name: kafka-ui
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - 8080:8080
+    environment:
+      DYNAMIC_CONFIG_ENABLED: false
+      KAFKA_CLUSTERS_0_NAME: broker1
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker1:9092
+      KAFKA_CLUSTERS_1_NAME: broker2
+      KAFKA_CLUSTERS_1_BOOTSTRAPSERVERS: broker2:9093
+    networks:
+      - app-network
+    depends_on:
+      broker1:
+        condition: service_healthy
+      broker2:
+        condition: service_healthy
+      kafka-initializer:
+        condition: service_completed_successfully
+
+  zookeeper:
+    image: "bitnami/zookeeper:latest"
+    ports:
+      - "2181:2181"
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: yes # 認証不要（ローカル用途）
+
+  broker1:
+    container_name: broker1
+    image: &kafka apache/kafka:3.8.0
+    ports:
+      - 9092:9092
+    volumes:
+      - ./docker/broker1:/var/lib/kafka/data
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: INTERNAL://broker1:29092,CONTROLLER://broker1:29093,EXTERNAL://broker1:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://broker1:29092,EXTERNAL://broker1:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker1:29093,2@broker2:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSET_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+      KAFKA_OFFSETS_STORAGE: kafka
+      KAFKA_LOG_DIRS: /tmp/kafka/logs
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      CLUSTER_ID: kafka-cluster
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "broker1:9092", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    platform: linux/amd64
+
+  broker2:
+    container_name: broker2
+    image: apache/kafka:3.8.0
+    ports:
+      - 9093:9093
+    volumes:
+      - ./docker/broker2:/var/lib/kafka/data
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: INTERNAL://broker2:29092,CONTROLLER://broker2:29093,EXTERNAL://broker2:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://broker2:29092,EXTERNAL://broker2:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker1:29093,2@broker2:29093
+      KAFKA_OFFSET_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+      KAFKA_LOG_DIRS: /tmp/kafka/logs
+      KAFKA_OFFSETS_STORAGE: kafka
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      CLUSTER_ID: kafka-cluster
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "broker2:9093", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    platform: linux/amd64
+
+  kafka-initializer:
+    container_name: kafka-initializer
+    image: *kafka
+    working_dir: /opt/kafka/bin
+    networks:
+      - app-network
+    depends_on:
+      broker1:
+        condition: service_healthy
+      broker2:
+        condition: service_healthy
+    command: >
+      /bin/bash -c "
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic __consumer_offsets --replication-factor=2 --partitions=50 --bootstrap-server broker1:9092
+      "
+    platform: linux/amd64
+
+  debezium:
+    image: debezium/connect:2.6
+    ports:
+      - 8083:8083
+    environment:
+      BOOTSTRAP_SERVERS: broker1:9092,broker2:9093   # Kafkaクラスタへの接続情報
+      GROUP_ID: 1                                    # Kafka Connectクラスタ内のグループID
+      CONFIG_STORAGE_TOPIC: my_connect_configs       # 設定情報を保存するトピック名
+      OFFSET_STORAGE_TOPIC: my_connect_offsets       # オフセット管理用トピック名
+      STATUS_STORAGE_TOPIC: my_connect_statuses      # Connectorのステータス情報
+    networks:
+      - app-network
+    depends_on:
+      broker1:
+        condition: service_healthy
+      broker2:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    platform: linux/amd64
+
+networks:
+  app-network:
+    driver: bridge
+    name: app-network
