@@ -22,6 +22,29 @@ services:
     command: npm run start:dev
     platform: linux/amd64
 
+  kafka-consumer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    ports:
+      - 3334:3001
+    volumes:
+      - ./consumer:/usr/src/app
+      - ./consumer/node_modules:/usr/src/app/node_modules
+    env_file:
+      - consumer/.env.docker
+    networks:
+      - app-network
+    depends_on:
+      broker1:
+        condition: service_healthy
+      broker2:
+        condition: service_healthy
+      kafka-initializer:
+        condition: service_completed_successfully
+    command: npm run start:dev
+    platform: linux/amd64
+
   db:
     container_name: db
     image: postgres:16
